@@ -183,7 +183,7 @@ Model slide_to_model(const vector<string> &slide) {
 
 
 void show_model(ostream &out, const Model &model) {
-    int w = min<int>(model.size() - 2, 20);
+    int w = min<int>(model[0].size() - 2, 20);
     int h = min<int>(model.size() - 2, 20);
     for (int i = 1; i <= h; i++) {
         for (int j = 1; j <= w; j++) {
