@@ -2,6 +2,7 @@
 
 #include <ostream>
 #include <vector>
+#include <array>
 #include <map>
 #include <unordered_map>
 #include <set>
@@ -10,7 +11,37 @@
 
 
 template<typename T>
+std::ostream& operator<<(std::ostream &out, const std::vector<T> &v);
+template<typename T, size_t size>
+std::ostream& operator<<(std::ostream &out, const std::array<T, size> &v);
+template<typename T>
+std::ostream& operator<<(std::ostream &out, const std::set<T> &s);
+template<typename K, typename V>
+std::ostream& operator<<(std::ostream &out, const std::map<K, V> &m);
+template<typename K, typename V>
+std::ostream& operator<<(std::ostream &out, const std::unordered_map<K, V> &m);
+template<typename T1, typename T2>
+std::ostream& operator<<(std::ostream &out, const std::pair<T1, T2> &p);
+template<typename... ElemTypes>
+std::ostream& operator<<(std::ostream &out, const std::tuple<ElemTypes...> &t);
+
+
+template<typename T>
 std::ostream& operator<<(std::ostream &out, const std::vector<T> &v) {
+  out << "[";
+  bool first = true;
+  for (const auto &e : v) {
+    if (!first)
+      out << ", ";
+    first = false;
+    out << e;
+  }
+  out << "]";
+  return out;
+}
+
+template<typename T, size_t size>
+std::ostream& operator<<(std::ostream &out, const std::array<T, size> &v) {
   out << "[";
   bool first = true;
   for (const auto &e : v) {
