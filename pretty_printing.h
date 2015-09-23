@@ -10,6 +10,23 @@
 #include <tuple>
 
 
+// I'm not even sure why this shadowing seems to work.
+// Also, there is a risk that libraries relying on old behavior will break.
+// But it's convenient for debug output.
+std::ostream& operator<<(std::ostream &out, const string &s) {
+    out << '"';
+    for (char c : s) {
+        switch (c) {
+            case '\n': out << "\\n"; break;
+            case '\"': out << "\\\""; break;
+            default: out << c; break;
+        }
+    }
+    out << '"';
+    return out;
+}
+
+
 template<typename T>
 std::ostream& operator<<(std::ostream &out, const std::vector<T> &v);
 template<typename T, size_t size>
