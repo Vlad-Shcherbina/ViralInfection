@@ -4,6 +4,9 @@
 #include <random>
 #include <array>
 #include <iomanip>
+#include <algorithm>
+#include <thread>
+#include <chrono>
 
 #include "pretty_printing.h"
 
@@ -45,7 +48,7 @@ void diffusion_step(const Matrix &cur, Matrix &next) {
 }
 
 
-const int M = 8;
+const int M = 6;
 class Diffusion {
     int w, h;
     int med_strength;
@@ -92,7 +95,46 @@ public:
 };
 
 
+int med_strength = -1;
+int kill_time = -1;
 double spread_prob = -1.0;
+int w = -1;
+int h = -1;
+Diffusion diffusion;
+
+
+struct PointSet {
+    set<pair<int, int>> points;
+    int min_idx;
+    int max_idx;
+    // TODO: add orthogonal index
+
+    PointSet() : min_idx(100000), max_idx(-1) {}
+
+    void add_point(int x, int y) {
+        assert(x >= 0);
+        assert(x < ::w);
+        assert(y >= 0);
+        assert(y < ::h);
+        int idx = x + w * y;
+        min_idx = min(min_idx, idx);
+        max_idx = max(max_idx, idx);
+        points.emplace(x, y);
+    }
+
+    bool dominates(const PointSet &other) const {
+        if (points.size() < other.points.size())
+            return false;
+
+        if (min_idx > other.min_idx || max_idx < other.max_idx)
+            return false;
+        for (auto pt : other.points) {
+            if (points.count(pt) == 0)
+                return false;
+        }
+        return true;
+    }
+};
 
 
 struct Distr {
@@ -138,7 +180,7 @@ struct Distr {
         inf_prob = 0.0;
     }
 
-    void check(const Distr reality) const {
+    void check(const Distr &reality) const {
         const double eps = 1e-8;
 
         if (reality.clean_prob > 0.5)
@@ -155,6 +197,11 @@ struct Distr {
             assert(dead_prob() > eps);
         else
             assert(dead_prob() < 1 - eps);
+    }
+
+    double dist(const Distr &other) const {
+        return abs(clean_prob - other.clean_prob) +
+               abs(inf_prob - other.inf_prob);
     }
 };
 
@@ -238,124 +285,330 @@ void cure_model(const vector<vector<double>> &med, Model &model) {
 }
 
 
-class ViralInfection {
-    int w, h;
-    Diffusion diffusion;
+struct CureFootprint {
+    vector<PointSet> cured_sets;
+    int x, y, t;
 
-public:
-    int runSim(vector<string> slide,
-               int med_strength, int kill_time, double spread_prob) {
-        h = slide.size();
-        w = slide[0].size();
-        ::spread_prob = spread_prob;
+    bool empty() const {
+        for (const auto &cs : cured_sets)
+            if (!cs.points.empty())
+                return false;
+        return true;
+    }
 
-        cerr << "# "; debug(w);
-        cerr << "# "; debug(h);
+    int size() const {
+        int result = 0;
+        for (const auto &cs : cured_sets)
+            result += cs.points.size();
+        return result;
+    }
 
-        cerr << "# "; debug(med_strength);
-        cerr << "# "; debug(kill_time);
-        cerr << "# "; debug(spread_prob);
+    bool dominates(const CureFootprint &other) const {
+        assert(cured_sets.size() == other.cured_sets.size());
+        for (int i = 0; i < cured_sets.size(); i++) {
+            if (!cured_sets[i].dominates(other.cured_sets[i]))
+                return false;
+        }
+        return true;
+    }
+};
 
-        diffusion = Diffusion(w, h, med_strength);
 
-        vector<vector<double>> med(h, vector<double>(w, 0.0));
+typedef map<pair<int, int>, double> Improvement;
 
-        auto model = slide_to_model(slide);
-        show_model(cerr, model);
-        cerr << endl;
+double improvement_sum(const Improvement &imp) {
+    double result = 0.0;
+    for (const auto &kv : imp)
+        result += kv.second;
+    return result;
+}
 
-        int iteration = 0;
-        while (true) {
-            int time_to_observation = kill_time;
-            if (kill_time == 1)
-                time_to_observation = 3;
-            if (kill_time == 2)
-                time_to_observation = 4;
-            if (iteration)
-                time_to_observation--;
+void improvement_merge_with(Improvement &imp, const Improvement &other) {
+    for (const auto &kv : other) {
+        double &q = imp[kv.first];
+        q = max(q, kv.second);
+    }
+}
 
-            auto plan = make_plan(med, model, time_to_observation);
-            for (int q = 0; q < time_to_observation; q++) {
-                // drop
-                auto pt = plan[q];
-                if (pt.first == -1) {
-                    Research::waitTime(1);
-                } else {
-                    int x = pt.first;
-                    int y = pt.second;
-                    Research::addMed(x, y);
-                    med[y][x] += med_strength;
-                }
 
-                // cure
-                cure_model(med, model);
+struct Modeller {
+    vector<bool> phases;
+    vector<vector<vector<double>>> med_prediction;
+    vector<Model> model_prediction;
 
-                // spread
-                if ((iteration + 1) % kill_time == 0) {
-                    // cerr << "spread during plan execution" << endl;
-                    auto new_model = model;
-                    update_model(model, new_model);
-                    model = new_model;
-                }
+    Modeller(
+        vector<vector<double>> med, Model model, vector<bool> phases)
+        : phases(phases),
+          med_prediction({med}),
+          model_prediction({model}) {
 
-                // diffuse
-                auto new_med = med;
-                diffusion_step(med, new_med);
-                med = new_med;
-
-                iteration++;
-            }
-
-            // observe and check
-            slide = Research::observe();
-            auto reality = slide_to_model(slide);
-            check_model(model, reality);
-
-            // cerr << "model:" << endl;
-            // show_model(cerr, model);
-            // cerr << endl;
-
-            // cerr << "reality:" << endl;
-            // show_model(cerr, reality);
-            // cerr << endl;
-
-            bool has_infection = false;
-            for (const auto &row : slide)
-                for (char c : row)
-                    if (c == 'V')
-                        has_infection = true;
-            if (!has_infection) {
-                break;
-            }
-
-            model = reality;
-
+        for (bool phase : phases) {
             // cure
-            // cerr << "obs cure {" << endl;
-            cure_model(med, model);
-            // cerr << "}" << endl;
+            cure_model(med_prediction.back(), model_prediction.back());
 
-            // spread
-            if ((iteration + 1) % kill_time == 0) {
-                // cerr << "spread during observation" << endl;
-                auto new_model = model;
-                update_model(model, new_model);
-                model = new_model;
+            if (phase) {
+                // spread
+                model_prediction.push_back(model_prediction.back());
+                update_model(
+                    model_prediction[model_prediction.size() - 2],
+                    model_prediction[model_prediction.size() - 1]);
             }
 
             // diffuse
-            auto new_med = med;
-            diffusion_step(med, new_med);
-            med = new_med;
-
-            iteration++;
+            med_prediction.push_back(med_prediction.back());
+            diffusion_step(
+                med_prediction[med_prediction.size() - 2],
+                med_prediction[med_prediction.size() - 1]);
         }
 
-        return 0;
+        // TODO: cure as well
     }
 
+    CureFootprint make_cure_footprint(int x0, int y0, int t0) const {
+        CureFootprint result;
+        result.x = x0;
+        result.y = y0;
+        result.t = t0;
+        result.cured_sets.resize(model_prediction.size());
+
+        for (int y = max(0, y0 - M); y < ::h && y <= y0 + M; y++) {
+            for (int x = max(0, x0 - M); x < ::w && x <= x0 + M; x++) {
+                // TODO: precompute start value of model_idx,
+                // and iterate from t0
+                int model_idx = 0;
+                for (int t = 0; t < phases.size() && t <= t0 + M; t++) {
+                    if (t >= t0) {
+                        // TODO: cure
+                        //if (model_prediction[model_idx])
+                        const auto &model = model_prediction[model_idx];
+                        if (model[y + 1][x + 1].inf_prob > 1e-6) {
+                            if (::diffusion.reach(x, y, x0, y0, t - t0) +
+                                0.99 * med_prediction[t][y][x] >= 1.0) {
+                                result.cured_sets[model_idx].add_point(x, y);
+                            }
+                        }
+                    }
+
+                    // spread
+                    if (phases[t])
+                        model_idx++;
+
+                    // diffuse (implicitly in loop step)
+                }
+                // TODO: cure as well
+            }
+        }
+
+        return result;
+    }
+
+    Improvement simulate(const vector<CureFootprint> &footprints) {
+        Improvement improvement;
+
+        set<pair<int, int>> changed;
+
+        vector<pair<Distr*, Distr>> old_values;
+
+        for (int q = 0; q < model_prediction.size(); q++) {
+            bool last = q + 1 == model_prediction.size();
+
+            set<pair<int, int>> all_cured_points;
+            for (const auto &f : footprints) {
+                for (const auto &pt : f.cured_sets[q].points) {
+                    int x = pt.first + 1;
+                    int y = pt.second + 1;
+                    all_cured_points.emplace(x, y);
+                }
+            }
+
+            set<pair<int, int>> neighbors_to_update;
+            for (const auto &pt : changed) {
+                int x = pt.first;
+                int y = pt.second;
+                if (x - 1 > 0)
+                    neighbors_to_update.emplace(x - 1, y);
+                if (x + 1 <= ::w)
+                    neighbors_to_update.emplace(x + 1, y);
+                if (y - 1 > 0)
+                    neighbors_to_update.emplace(x, y - 1);
+                if (y + 1 <= ::h)
+                    neighbors_to_update.emplace(x, y + 1);
+            }
+            changed.clear();
+            for (const auto &pt : neighbors_to_update) {
+                int x = pt.first;
+                int y = pt.second;
+
+                const auto &prev_model = model_prediction[q - 1];
+                auto &model = model_prediction[q];
+
+                auto new_distr = all_cured_points.count(pt) > 0
+                    ? Distr::clean()
+                    : prev_model[y][x].step(
+                        prev_model[y - 1][x],
+                        prev_model[y + 1][x],
+                        prev_model[y][x - 1],
+                        prev_model[y][x + 1]);
+
+                if (new_distr.dist(model[y][x]) > 1e-6) {
+                    double delta = new_distr.clean_prob - model[y][x].clean_prob;
+
+                    // TODO: this assertion fails, why?
+                    // assert(delta >= -1e-6);
+
+                    if (last && delta > 1e-3) {
+                        assert(improvement.count(pt) == 0);
+                        improvement[pt] = delta;
+                    }
+
+                    old_values.emplace_back(&model[y][x], model[y][x]);
+                    model[y][x] = new_distr;
+                    changed.insert(pt);
+                }
+            }
+
+            // TODO: change should only be considered change after
+            // spread step together with cure step.
+
+            for (auto pt : all_cured_points) {
+                int x = pt.first;
+                int y = pt.second;
+                auto &distr = model_prediction[q][y][x];
+                // Some points can be visited second time, but then condition
+                // will be false, so we won't update them twice.
+                if (distr.inf_prob > 1e-6) {
+                    if (last && distr.inf_prob > 1e-3) {
+                        assert(improvement.count(pt) == 0);
+                        improvement[pt] = distr.inf_prob;
+                    }
+
+                    old_values.emplace_back(&distr, distr);
+                    distr.cure();
+                    changed.insert(pt);
+                }
+            }
+        }
+
+        reverse(old_values.begin(), old_values.end());
+        for (auto kv : old_values) {
+            *kv.first = kv.second;
+        }
+
+        // TODO: assert that model_prediction did not change
+        return improvement;
+    }
+};
+
+
+class ViralInfection {
+public:
+
     vector<pair<int, int>> make_plan(
-        vector<vector<double>> med, Model model, int time_to_observation) {
+        vector<vector<double>> med, Model model, int time_to_observation, int start_iteration) {
+
+        // TODO: take into account actual iteration % kill_time
+        vector<bool> phases;
+        for (int i = 0; i < time_to_observation + 1; i++)
+            phases.push_back(start_iteration + i > 0 &&
+                             (start_iteration + i + 1) % ::kill_time == 0);
+        debug(phases);
+        // phases.push_back(true);
+
+        Modeller modeller(med, model, phases);
+
+        vector<pair<CureFootprint, Improvement>> choices;
+
+        for (int t = 0; t < time_to_observation; t++) {
+            vector<CureFootprint> cure_footprints;
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    auto cfp = modeller.make_cure_footprint(x, y, t);
+                    if (!cfp.empty())
+                        cure_footprints.push_back(cfp);
+                }
+            }
+            debug2(t, cure_footprints.size());
+
+            sort(cure_footprints.begin(), cure_footprints.end(),
+                [](const CureFootprint &a, const CureFootprint &b) {
+                    return a.size() > b.size();
+                });
+
+            // TODO: among equivalent items, pick ones that go ahead of the
+            // frontier as much as possible.
+            vector<CureFootprint> frontier_cure_footprints;
+            for (const auto &cfp : cure_footprints) {
+                bool to_add = true;
+                for (const auto &d : frontier_cure_footprints) {
+                    if (d.dominates(cfp)) {
+                        to_add = false;
+                        break;
+                    }
+                }
+                if (to_add)
+                    frontier_cure_footprints.push_back(cfp);
+            }
+            debug(frontier_cure_footprints.size());
+
+            for (const auto &fp : frontier_cure_footprints) {
+                auto imp = modeller.simulate({fp});
+                for (auto &kv : imp) {
+                    int x = kv.first.first;
+                    int y = kv.first.second;
+                    kv.second *= exp(-(x + y) * 0.05);
+                }
+                choices.emplace_back(fp, imp);
+            }
+            // #for (auto fp : frontier_cure_footprints)
+            // debug2(frontier_cure_footprints.front().cured_sets[0].points,
+            //        frontier_cure_footprints.front().cured_sets[1].points);
+            // debug(modeller.simulate({frontier_cure_footprints.front()}));
+            // debug(modeller.simulate({frontier_cure_footprints.back()}));
+        }
+
+        debug(choices.size());
+
+        // vector<bool> free_slots(time_to_observation, true);
+        vector<pair<int, int>> sol(time_to_observation, {-1, -1});
+        Improvement accum;
+        while (true) {
+            double best_improvement = improvement_sum(accum);
+            Improvement new_accum;
+
+            int best_t = -1;
+            int best_x;
+            int best_y;
+
+            for (const auto &choice : choices) {
+                const auto &fp = choice.first;
+                const auto &extra_imp = choice.second;
+
+                if (sol[fp.t].first != -1)
+                    continue;
+
+                Improvement tmp_imp = accum;
+                improvement_merge_with(tmp_imp, extra_imp);
+                double new_sum = improvement_sum(tmp_imp);
+                if (new_sum > best_improvement) {
+                    best_improvement = new_sum;
+                    best_t = fp.t;
+                    best_x = fp.x;
+                    best_y = fp.y;
+
+                    new_accum = tmp_imp;
+                    // debug2(new_sum, tmp_imp);
+                }
+            }
+            if (best_t == -1)
+                break;
+            sol[best_t] = {best_x, best_y};
+            accum = new_accum;
+        }
+        debug(sol);
+        debug2(accum, improvement_sum(accum));
+        return sol;
+
+
         // cerr << "begin plan" << endl;
         vector<pair<int, int>> result;
 
@@ -435,4 +688,119 @@ public:
         return result;
     }
 
+    int runSim(vector<string> slide,
+               int med_strength, int kill_time, double spread_prob) {
+        ::h = slide.size();
+        ::w = slide[0].size();
+        ::med_strength = med_strength;
+        ::kill_time = kill_time;
+        ::spread_prob = spread_prob;
+
+        cerr << "# "; debug(w);
+        cerr << "# "; debug(h);
+
+        cerr << "# "; debug(med_strength);
+        cerr << "# "; debug(kill_time);
+        cerr << "# "; debug(spread_prob);
+
+        ::diffusion = Diffusion(w, h, med_strength);
+
+        vector<vector<double>> med(h, vector<double>(w, 0.0));
+
+        auto model = slide_to_model(slide);
+        show_model(cerr, model);
+        cerr << endl;
+
+        int iteration = 0;
+        while (true) {
+            int time_to_observation = kill_time;
+            if (kill_time == 1)
+                time_to_observation = 3;
+            if (kill_time == 2)
+                time_to_observation = 4;
+            if (iteration)
+                time_to_observation--;
+
+            auto plan = make_plan(med, model, time_to_observation, iteration);
+            for (int q = 0; q < time_to_observation; q++) {
+                // drop
+                auto pt = plan[q];
+                if (pt.first == -1) {
+                    Research::waitTime(1);
+                    // this_thread::sleep_for(std::chrono::seconds(3));
+                } else {
+                    int x = pt.first;
+                    int y = pt.second;
+                    Research::addMed(x, y);
+                    // this_thread::sleep_for(std::chrono::seconds(3));
+                    med[y][x] += med_strength;
+                }
+
+                // cure
+                cure_model(med, model);
+
+                // spread
+                if ((iteration + 1) % kill_time == 0) {
+                    // cerr << "spread during plan execution" << endl;
+                    auto new_model = model;
+                    update_model(model, new_model);
+                    model = new_model;
+                }
+
+                // diffuse
+                auto new_med = med;
+                diffusion_step(med, new_med);
+                med = new_med;
+
+                iteration++;
+            }
+
+            // observe and check
+            slide = Research::observe();
+            // this_thread::sleep_for(std::chrono::seconds(3));
+            auto reality = slide_to_model(slide);
+            check_model(model, reality);
+
+            // cerr << "model:" << endl;
+            // show_model(cerr, model);
+            // cerr << endl;
+
+            // cerr << "reality:" << endl;
+            // show_model(cerr, reality);
+            // cerr << endl;
+
+            bool has_infection = false;
+            for (const auto &row : slide)
+                for (char c : row)
+                    if (c == 'V')
+                        has_infection = true;
+            if (!has_infection) {
+                break;
+            }
+
+            model = reality;
+
+            // cure
+            // cerr << "obs cure {" << endl;
+            cure_model(med, model);
+            // cerr << "}" << endl;
+
+            // spread
+            if ((iteration + 1) % kill_time == 0) {
+                // cerr << "spread during observation" << endl;
+                auto new_model = model;
+                update_model(model, new_model);
+                model = new_model;
+            }
+
+            // diffuse
+            auto new_med = med;
+            diffusion_step(med, new_med);
+            med = new_med;
+
+            iteration++;
+        }
+
+        return 0;
+    }
 };
