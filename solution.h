@@ -7,14 +7,17 @@
 #include <algorithm>
 #include <thread>
 #include <chrono>
+#include <functional>
 
 #include "pretty_printing.h"
 
 using namespace std;
 
 
-#define debug(x) cerr << #x " = " << (x) << endl;
-#define debug2(x, y) cerr << #x " = " << (x) << ", " #y " = " << y << endl;
+#define debug(x) cerr << #x " = " << (x) << endl
+#define debug2(x, y) cerr << #x " = " << (x) << ", " #y " = " << y << endl
+#define debug3(x, y, z) \
+    cerr << #x " = " << (x) << ", " #y " = " << y << ", " #z " = " << z << endl
 
 
 typedef vector<string> Slide;
@@ -371,21 +374,23 @@ struct Modeller {
         result.t = t0;
         result.cured_sets.resize(model_prediction.size());
 
+        assert(t0 <= phases.size());
+        int start_model_idx = count(phases.begin(), phases.begin() + t0, true);
+
         for (int y = max(0, y0 - M); y < ::h && y <= y0 + M; y++) {
             for (int x = max(0, x0 - M); x < ::w && x <= x0 + M; x++) {
+                if (abs(x - x0) + abs(y - y0) > M)
+                    continue;
                 // TODO: precompute start value of model_idx,
                 // and iterate from t0
-                int model_idx = 0;
-                for (int t = 0; t < phases.size() && t <= t0 + M; t++) {
-                    if (t >= t0) {
-                        // TODO: cure
-                        //if (model_prediction[model_idx])
-                        const auto &model = model_prediction[model_idx];
-                        if (model[y + 1][x + 1].inf_prob > 1e-6) {
-                            if (::diffusion.reach(x, y, x0, y0, t - t0) +
-                                0.99 * med_prediction[t][y][x] >= 1.0) {
-                                result.cured_sets[model_idx].add_point(x, y);
-                            }
+                int model_idx = start_model_idx;
+                for (int t = t0; t < phases.size() && t <= t0 + M; t++) {
+                    // cure
+                    const auto &model = model_prediction[model_idx];
+                    if (model[y + 1][x + 1].inf_prob > 1e-6) {
+                        if (::diffusion.reach(x, y, x0, y0, t - t0) +
+                            0.99 * med_prediction[t][y][x] >= 1.0) {
+                            result.cured_sets[model_idx].add_point(x, y);
                         }
                     }
 
@@ -393,7 +398,7 @@ struct Modeller {
                     if (phases[t])
                         model_idx++;
 
-                    // diffuse (implicitly in loop step)
+                    // diffuse (implicitly in loop increment)
                 }
                 // TODO: cure as well
             }
@@ -506,13 +511,14 @@ public:
     vector<pair<int, int>> make_plan(
         vector<vector<double>> med, Model model, int time_to_observation, int start_iteration) {
 
-        // TODO: take into account actual iteration % kill_time
         vector<bool> phases;
-        for (int i = 0; i < time_to_observation + 1; i++)
+
+        int T = time_to_observation + (::kill_time == 1 ? 3 : 5);
+
+        for (int i = 0; i < T; i++)
             phases.push_back(start_iteration + i > 0 &&
                              (start_iteration + i + 1) % ::kill_time == 0);
         debug(phases);
-        // phases.push_back(true);
 
         Modeller modeller(med, model, phases);
 
@@ -550,12 +556,15 @@ public:
             }
             debug(frontier_cure_footprints.size());
 
+            double frontier_speed =
+                sqrt(::med_strength) * ::kill_time / min(::w, ::h);
+
             for (const auto &fp : frontier_cure_footprints) {
                 auto imp = modeller.simulate({fp});
                 for (auto &kv : imp) {
                     int x = kv.first.first;
                     int y = kv.first.second;
-                    kv.second *= exp(-(x + y) * 0.05);
+                    kv.second *= exp(-(x + y) * 0.02 / frontier_speed);
                 }
                 choices.emplace_back(fp, imp);
             }
@@ -596,96 +605,17 @@ public:
                     best_y = fp.y;
 
                     new_accum = tmp_imp;
-                    // debug2(new_sum, tmp_imp);
                 }
             }
             if (best_t == -1)
                 break;
             sol[best_t] = {best_x, best_y};
+            debug3(best_t, best_x, best_y);
             accum = new_accum;
         }
         debug(sol);
-        debug2(accum, improvement_sum(accum));
+        debug(improvement_sum(accum));
         return sol;
-
-
-        // cerr << "begin plan" << endl;
-        vector<pair<int, int>> result;
-
-        vector<vector<vector<double>>> med_prediction = {med};
-        for (int i = 1; i < time_to_observation; i++) {
-            med_prediction.push_back(med_prediction.back());
-            assert(med_prediction.size() == i + 1);
-            diffusion_step(med_prediction[i - 1], med_prediction[i]);
-        }
-
-        static default_random_engine gen;
-
-        /*for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
-                double p = model[y + 1][x + 1].inf_prob;
-                if (p > 0.01) {
-                    debug2(x, y);
-                    debug(p);
-                }
-            }
-        }*/
-
-        auto affected_by = [&](int x, int y, int t) {
-            vector<pair<int, int>> result;
-            for (int i = max(0, y - M); i < h && i <= y + M; i++) {
-                for (int j = max(0, x - M); j < w && j <= x + M; j++) {
-                    if (model[i + 1][j + 1].inf_prob < 0.3)
-                        continue;
-                    for (int k = t; k < time_to_observation; k++) {
-                        int dt = time_to_observation - 1 - k;
-                        if (diffusion.reach(x, y, j, i, dt) + 0.99 * med_prediction[k][i][j] >= 1.0) {
-                            result.emplace_back(j, i);
-                            break;
-                        }
-                    }
-                }
-            }
-            return result;
-        };
-
-        for (int index = 0; index < time_to_observation; index++) {
-
-            int best_x = -1;
-            int best_y = -1;
-            double best = 0;
-            for (int y = 0; y < h; y++) {
-                for (int x = 0; x < w; x++) {
-                    double q = 0.0;
-                    for (auto pt : affected_by(x, y, index)) {
-                        // TODO: things eliminated at the last (spread) step
-                        // are less certain and should be discounted.
-                        q += exp(-(x + y) * 0.1) *
-                            (model[pt.second + 1][pt.first + 1].inf_prob + 0.00001 * (x + y));
-                    }
-                    if (q > best) {
-                        best_x = x;
-                        best_y = y;
-                        best = q;
-                    }
-                }
-            }
-
-            // debug(best);
-            // debug2(best_x, best_y);
-
-            result.emplace_back(best_x, best_y);
-            if (best_x != -1) {
-                // debug(affected_by(best_x, best_y, index));
-                for (auto pt : affected_by(best_x, best_y, index)) {
-                    model[pt.second + 1][pt.first + 1].cure();
-                }
-            }
-        }
-
-        // cerr << "end plan" << endl;
-        assert(result.size() == time_to_observation);
-        return result;
     }
 
     int runSim(vector<string> slide,
@@ -718,11 +648,22 @@ public:
                 time_to_observation = 3;
             if (kill_time == 2)
                 time_to_observation = 4;
+            // if (kill_time == 3)
+            //     time_to_observation = 6;
             if (iteration)
                 time_to_observation--;
 
             auto plan = make_plan(med, model, time_to_observation, iteration);
+            assert(plan.size() == time_to_observation);
             for (int q = 0; q < time_to_observation; q++) {
+
+                // if (all_of(plan.begin() + q, plan.end(),
+                //            bind1st(equal_to<pair<int, int>>(), make_pair(-1, -1)))) {
+                //     cerr << "early exit" << endl;
+                //     debug(q);
+                //     return 0;
+                // }
+
                 // drop
                 auto pt = plan[q];
                 if (pt.first == -1) {
@@ -751,6 +692,15 @@ public:
                 auto new_med = med;
                 diffusion_step(med, new_med);
                 med = new_med;
+
+                bool has_virus = false;
+                for (int y = 0; y < ::h; y++)
+                    for (int x = 0; x < ::w; x++)
+                        if (model[y + 1][x + 1].inf_prob > 1e-8)
+                            has_virus = true;
+                if (!has_virus) {
+                    return 0;
+                }
 
                 iteration++;
             }
@@ -797,6 +747,15 @@ public:
             auto new_med = med;
             diffusion_step(med, new_med);
             med = new_med;
+
+            bool has_virus = false;
+            for (int y = 0; y < ::h; y++)
+                for (int x = 0; x < ::w; x++)
+                    if (model[y + 1][x + 1].inf_prob > 1e-8)
+                        has_virus = true;
+            if (!has_virus) {
+                return 0;
+            }
 
             iteration++;
         }
