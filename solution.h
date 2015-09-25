@@ -505,6 +505,70 @@ struct Modeller {
 };
 
 
+double greedy(const vector<pair<CureFootprint, Improvement>> &choices,
+            vector<pair<int, int>> &sol) {
+    Improvement accum;
+    for (const auto &choice : choices) {
+        const auto &fp = choice.first;
+        if (sol[fp.t] == make_pair(fp.x, fp.y))
+            improvement_merge_with(accum, choice.second);
+    }
+
+    while (true) {
+        double best_improvement = improvement_sum(accum);
+        Improvement new_accum;
+
+        int best_t = -1;
+        int best_x;
+        int best_y;
+
+        for (const auto &choice : choices) {
+            const auto &fp = choice.first;
+            const auto &extra_imp = choice.second;
+
+            if (sol[fp.t].first != -1)
+                continue;
+
+            Improvement tmp_imp = accum;
+            improvement_merge_with(tmp_imp, extra_imp);
+            double new_sum = improvement_sum(tmp_imp);
+            if (new_sum > best_improvement) {
+                best_improvement = new_sum;
+                best_t = fp.t;
+                best_x = fp.x;
+                best_y = fp.y;
+
+                new_accum = tmp_imp;
+            }
+        }
+        if (best_t == -1)
+            break;
+        sol[best_t] = {best_x, best_y};
+        debug3(best_t, best_x, best_y);
+        accum = new_accum;
+    }
+    return improvement_sum(accum);
+}
+
+bool try_improve(const vector<pair<CureFootprint, Improvement>> &choices,
+                 vector<pair<int, int>> &sol) {
+    double base_score = greedy(choices, sol);
+    auto sol2 = sol;
+    static default_random_engine gen;
+    for (auto &p : sol2) {
+        if (bernoulli_distribution(0.5)(gen))
+            p = {-1, -1};
+    }
+    double new_score = greedy(choices, sol2);
+    debug2(new_score, base_score);
+    if (new_score > base_score) {
+        cerr << string(60, '*') << endl;
+        sol = sol2;
+        return true;
+    }
+    return false;
+}
+
 class ViralInfection {
 public:
 
@@ -564,7 +628,12 @@ public:
                 for (auto &kv : imp) {
                     int x = kv.first.first;
                     int y = kv.first.second;
-                    kv.second *= exp(-(x + y) * 0.02 / frontier_speed);
+                    double d = x + y;
+                    // if (::w < 2 * ::h)
+                    //     d = 1.4 * y;
+                    // if (::h < 2 * ::w)
+                    //     d = 1.4 * x;
+                    kv.second *= exp(-d * 0.02 / frontier_speed);
                 }
                 choices.emplace_back(fp, imp);
             }
@@ -579,42 +648,14 @@ public:
 
         // vector<bool> free_slots(time_to_observation, true);
         vector<pair<int, int>> sol(time_to_observation, {-1, -1});
-        Improvement accum;
-        while (true) {
-            double best_improvement = improvement_sum(accum);
-            Improvement new_accum;
 
-            int best_t = -1;
-            int best_x;
-            int best_y;
+        double sol_score = greedy(choices, sol);
+        // for (int i = 0; i < 100; i++)
+        //     try_improve(choices, sol);
 
-            for (const auto &choice : choices) {
-                const auto &fp = choice.first;
-                const auto &extra_imp = choice.second;
-
-                if (sol[fp.t].first != -1)
-                    continue;
-
-                Improvement tmp_imp = accum;
-                improvement_merge_with(tmp_imp, extra_imp);
-                double new_sum = improvement_sum(tmp_imp);
-                if (new_sum > best_improvement) {
-                    best_improvement = new_sum;
-                    best_t = fp.t;
-                    best_x = fp.x;
-                    best_y = fp.y;
-
-                    new_accum = tmp_imp;
-                }
-            }
-            if (best_t == -1)
-                break;
-            sol[best_t] = {best_x, best_y};
-            debug3(best_t, best_x, best_y);
-            accum = new_accum;
-        }
         debug(sol);
-        debug(improvement_sum(accum));
+        debug(sol_score);
+
         return sol;
     }
 
