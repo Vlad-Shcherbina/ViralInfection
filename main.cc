@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <cassert>
+#include <sstream>
 
 using namespace std;
 
@@ -46,6 +47,45 @@ public:
 
 int main(int argc, char **argv) {
     debug2(argc, argv);
+
+    if (argc > 1) {
+        vector<string> args;
+        copy(argv + 1, argv + argc, back_inserter(args));
+        debug(args);
+
+        for (auto p = args.begin(); p < args.end(); p += 2) {
+            assert(p + 1 < args.end());
+
+            const string &param = p[0];
+
+            istringstream in(p[1]);
+            double value;
+            in >> value;
+            assert(in);
+
+            assert(::parameters.count(param) == 1);
+            ::parameters.at(param) = value;
+        }
+
+        /*assert(argc == 2);
+        istringstream in(argv[1]);
+        while (true) {
+            string param;
+            in >> param;
+            debug(param);
+            assert(in);
+            double value;
+            in >> value;
+            debug(value);
+            // assert(in);
+            assert(::parameters.count(param) == 1);
+            ::parameters.at(param) = value;
+            assert(in);
+            if (in.eof())
+                break;
+        }*/
+    }
+    cerr << "done" << endl;
 
     int H;
     cin >> H;

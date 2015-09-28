@@ -105,6 +105,11 @@ int w = -1;
 int h = -1;
 Diffusion diffusion;
 
+map<string, double> parameters = {
+    {"frontier_discount_factor", 0.02},
+    {"tto", 3},
+};
+
 
 struct PointSet {
     set<pair<int, int>> points;
@@ -633,7 +638,7 @@ public:
                     //     d = 1.4 * y;
                     // if (::h < 2 * ::w)
                     //     d = 1.4 * x;
-                    kv.second *= exp(-d * 0.02 / frontier_speed);
+                    kv.second *= exp(-d * parameters.at("frontier_discount_factor") / frontier_speed);
                 }
                 choices.emplace_back(fp, imp);
             }
@@ -667,12 +672,32 @@ public:
         ::kill_time = kill_time;
         ::spread_prob = spread_prob;
 
-        cerr << "# "; debug(w);
-        cerr << "# "; debug(h);
+        cerr << "## "; debug(w);
+        cerr << "## "; debug(h);
 
-        cerr << "# "; debug(med_strength);
-        cerr << "# "; debug(kill_time);
-        cerr << "# "; debug(spread_prob);
+        cerr << "## "; debug(med_strength);
+        cerr << "## "; debug(kill_time);
+        cerr << "## "; debug(spread_prob);
+
+        double infected_density = 0;
+        double dead_density = 0;
+        for (const auto &row : slide) {
+            for (char c : row) {
+                if (c == 'V') infected_density++;
+                if (c == 'X') dead_density++;
+            }
+        }
+        infected_density /= w * h;
+        dead_density /= w * h;
+        cerr << "## "; debug(infected_density);
+        cerr << "## "; debug(dead_density);
+
+        double tto = parameters.at("tto");
+        cerr << "## "; debug(tto);
+
+        ///////////////
+        // return 0;
+        ///////////////
 
         ::diffusion = Diffusion(w, h, med_strength);
 
@@ -686,11 +711,17 @@ public:
         while (true) {
             int time_to_observation = kill_time;
             if (kill_time == 1)
-                time_to_observation = 3;
-            if (kill_time == 2)
-                time_to_observation = 4;
+                 time_to_observation = 3;
+            //if (kill_time == 2)
+            //    time_to_observation = 4;
             // if (kill_time == 3)
             //     time_to_observation = 6;
+
+            //time_to_observation = kill_time * parameters.at("tto");
+
+            if (kill_time >= 2 && kill_time <= 6 && spread_prob < 4.4)
+                time_to_observation = 2 * kill_time;
+
             if (iteration)
                 time_to_observation--;
 
@@ -801,6 +832,8 @@ public:
             iteration++;
         }
 
+        cerr.flush();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
         return 0;
     }
 };
